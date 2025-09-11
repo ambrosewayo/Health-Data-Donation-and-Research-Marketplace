@@ -12,6 +12,9 @@
 (define-constant err-already-exists (err u105))
 (define-constant err-expired (err u106))
 (define-constant err-invalid-status (err u107))
+(define-constant err-already-rated (err u108))
+(define-constant err-no-access (err u109))
+(define-constant err-invalid-rating (err u110))
 
 (define-data-var next-dataset-id uint u1)
 (define-data-var next-request-id uint u1)
@@ -29,7 +32,9 @@
     compensation: uint,
     access-count: uint,
     verified: bool,
-    active: bool
+    active: bool,
+    quality-score: uint,
+    total-ratings: uint
   }
 )
 
@@ -73,6 +78,15 @@
     access-granted: bool,
     access-timestamp: uint,
     payment-made: uint
+  }
+)
+
+(define-map quality-ratings
+  { dataset-id: uint, researcher: principal }
+  {
+    rating: uint,
+    feedback: (string-ascii 200),
+    timestamp: uint
   }
 )
 
@@ -127,7 +141,9 @@
         compensation: min-compensation-required,
         access-count: u0,
         verified: false,
-        active: true
+        active: true,
+        quality-score: u0,
+        total-ratings: u0
       }
     )
     (match (map-get? donor-stats { donor: tx-sender })
@@ -263,6 +279,48 @@
   )
 )
 
+(define-public (rate-dataset-quality 
+  (dataset-id uint) 
+  (rating uint) 
+  (feedback (string-ascii 200)))
+  (let (
+    (dataset (unwrap! (map-get? datasets { dataset-id: dataset-id }) err-not-found))
+    (access-record (unwrap! (map-get? dataset-access { dataset-id: dataset-id, researcher: tx-sender }) err-no-access))
+    (existing-rating (map-get? quality-ratings { dataset-id: dataset-id, researcher: tx-sender }))
+  )
+    (asserts! (>= rating u1) err-invalid-rating)
+    (asserts! (<= rating u5) err-invalid-rating)
+    (asserts! (get access-granted access-record) err-no-access)
+    (asserts! (is-none existing-rating) err-already-rated)
+    
+    (map-set quality-ratings
+      { dataset-id: dataset-id, researcher: tx-sender }
+      {
+        rating: rating,
+        feedback: feedback,
+        timestamp: stacks-block-height
+      }
+    )
+    
+    (let (
+      (current-total-score (* (get quality-score dataset) (get total-ratings dataset)))
+      (new-total-ratings (+ (get total-ratings dataset) u1))
+      (new-total-score (+ current-total-score rating))
+      (new-average-score (/ new-total-score new-total-ratings))
+    )
+      (map-set datasets
+        { dataset-id: dataset-id }
+        (merge dataset { 
+          quality-score: new-average-score,
+          total-ratings: new-total-ratings
+        })
+      )
+    )
+    
+    (ok rating)
+  )
+)
+
 (define-public (update-researcher-reputation (researcher principal) (score-change int))
   (begin
     (asserts! (is-eq tx-sender contract-owner) err-owner-only)
@@ -334,6 +392,49 @@
   (map-get? dataset-access { dataset-id: dataset-id, researcher: researcher })
 )
 
+(define-read-only (get-quality-rating (dataset-id uint) (researcher principal))
+  (map-get? quality-ratings { dataset-id: dataset-id, researcher: researcher })
+)
+
+(define-read-only (get-dataset-quality-summary (dataset-id uint))
+  (match (map-get? datasets { dataset-id: dataset-id })
+    dataset {
+      dataset-id: dataset-id,
+      quality-score: (get quality-score dataset),
+      total-ratings: (get total-ratings dataset),
+      access-count: (get access-count dataset),
+      data-type: (get data-type dataset)
+    }
+    {
+      dataset-id: u0,
+      quality-score: u0,
+      total-ratings: u0,
+      access-count: u0,
+      data-type: ""
+    }
+  )
+)
+
+(define-read-only (get-high-quality-datasets (min-quality uint))
+  (get results (fold check-quality-threshold (list u1 u2 u3 u4 u5 u6 u7 u8 u9 u10 u11 u12 u13 u14 u15 u16 u17 u18 u19 u20) { min-quality: min-quality, results: (list) }))
+)
+
+(define-private (check-quality-threshold (dataset-id uint) (context { min-quality: uint, results: (list 20 uint) }))
+  (let ((dataset (map-get? datasets { dataset-id: dataset-id })))
+    (if (and (is-some dataset)
+             (get verified (unwrap-panic dataset))
+             (get active (unwrap-panic dataset))
+             (> (get total-ratings (unwrap-panic dataset)) u0)
+             (>= (get quality-score (unwrap-panic dataset)) (get min-quality context)))
+      { 
+        min-quality: (get min-quality context), 
+        results: (unwrap-panic (as-max-len? (append (get results context) dataset-id) u20))
+      }
+      context
+    )
+  )
+)
+
 (define-read-only (get-platform-stats)
   {
     total-datasets: (- (var-get next-dataset-id) u1),
@@ -353,11 +454,13 @@
         researcher-verified: (get verified profile),
         data-type: (get data-type dataset),
         required-compensation: (get compensation dataset),
-        access-count: (get access-count dataset)
+        access-count: (get access-count dataset),
+        quality-score: (get quality-score dataset),
+        total-ratings: (get total-ratings dataset)
       }
-      { dataset-verified: false, dataset-active: false, researcher-verified: false, data-type: "", required-compensation: u0, access-count: u0 }
+      { dataset-verified: false, dataset-active: false, researcher-verified: false, data-type: "", required-compensation: u0, access-count: u0, quality-score: u0, total-ratings: u0 }
     )
-    { dataset-verified: false, dataset-active: false, researcher-verified: false, data-type: "", required-compensation: u0, access-count: u0 }
+    { dataset-verified: false, dataset-active: false, researcher-verified: false, data-type: "", required-compensation: u0, access-count: u0, quality-score: u0, total-ratings: u0 }
   )
 )
 

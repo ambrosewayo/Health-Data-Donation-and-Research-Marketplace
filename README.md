@@ -7,6 +7,8 @@ A decentralized platform enabling patients to anonymously donate health data and
 - **Anonymous Data Donation**: Patients submit health data with cryptographic anonymization
 - **Cryptocurrency Compensation**: Donors receive STX tokens for their data contributions
 - **Verified Research Access**: Researchers must be verified and pay for dataset access
+- **Data Quality Rating System**: Researchers rate datasets (1-5 stars) with feedback after purchase
+- **Quality-Based Discovery**: Find high-quality datasets using quality scores and ratings
 - **Reputation System**: Both donors and researchers build reputation through platform usage
 - **Data Marketplace**: Researchers create requests, donors fulfill them through matching
 - **Platform Security**: Built-in verification, expiration, and cleanup mechanisms
@@ -60,6 +62,12 @@ Purchase access to a specific dataset.
 (contract-call? .Health_data_research purchase-dataset-access dataset-id request-id)
 ```
 
+#### `rate-dataset-quality`
+Rate a dataset you've purchased (1-5 stars with feedback).
+```clarity
+(contract-call? .Health_data_research rate-dataset-quality dataset-id u4 "High quality MRI data with clear annotations")
+```
+
 #### `get-researcher-dashboard`
 View your research profile and request history.
 ```clarity
@@ -80,6 +88,24 @@ Verify if a researcher can access a dataset.
 (contract-call? .Health_data_research check-dataset-eligibility dataset-id researcher-principal)
 ```
 
+#### `get-high-quality-datasets`
+Find datasets with quality scores above a threshold.
+```clarity
+(contract-call? .Health_data_research get-high-quality-datasets u4)
+```
+
+#### `get-dataset-quality-summary`
+View quality metrics for a specific dataset.
+```clarity
+(contract-call? .Health_data_research get-dataset-quality-summary dataset-id)
+```
+
+#### `get-quality-rating`
+View a specific researcher's rating for a dataset.
+```clarity
+(contract-call? .Health_data_research get-quality-rating dataset-id researcher-principal)
+```
+
 #### `get-platform-stats`
 View overall platform statistics.
 ```clarity
@@ -98,9 +124,10 @@ View overall platform statistics.
 1. Call `register-researcher` with institutional information
 2. Wait for platform verification of researcher status
 3. Call `create-research-request` specifying data needs and payment
-4. Use `get-matching-datasets` to find suitable data
+4. Use `get-matching-datasets` or `get-high-quality-datasets` to find suitable data
 5. Call `purchase-dataset-access` to buy access to specific datasets
 6. Access granted datasets using the provided data hash
+7. Rate dataset quality using `rate-dataset-quality` to help future researchers
 
 ## Security Features
 
