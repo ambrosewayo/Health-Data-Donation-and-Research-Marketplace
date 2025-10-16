@@ -624,3 +624,317 @@
     )
   )
 )
+
+(define-constant ERR_POOL_ZERO u120)
+(define-constant ERR_POOL_CLOSED u121)
+(define-constant ERR_POOL_OPEN u122)
+(define-constant ERR_POOL_MIN_CONTRIB u123)
+(define-constant ERR_POOL_MAX_PARTICIPANTS u124)
+(define-constant ERR_POOL_ALREADY_CONTRIBUTED u125)
+(define-constant ERR_POOL_INVALID u126)
+(define-constant ERR_POOL_INSUFFICIENT u127)
+(define-constant ERR_POOL_NOT_ELIGIBLE u128)
+(define-constant ERR_POOL_ALREADY_FINAL u129)
+(define-constant ERR_POOL_NOT_FINAL u130)
+(define-constant BPS u10000)
+
+(define-data-var next-pool-id uint u1)
+
+(define-map pools
+  { id: uint }
+  {
+    owner: principal,
+    title: (string-utf8 64),
+    purpose: (string-utf8 96),
+    min-contribution: uint,
+    max-participants: uint,
+    access-price: uint,
+    donor-share-bps: uint,
+    open: bool,
+    created-at: uint
+  }
+)
+
+(define-map pool-funding
+  { id: uint }
+  {
+    total-funded: uint,
+    donor-allocation: uint,
+    donor-claimed: uint,
+    owner-withdrawn: uint,
+    participants: uint,
+    donors: uint,
+    total-datasets: uint
+  }
+)
+
+(define-map pool-participant
+  { id: uint, who: principal }
+  {
+    contributed: uint,
+    joined-at: uint
+  }
+)
+
+(define-map pool-donor
+  { id: uint, who: principal }
+  {
+    datasets: (list 32 uint),
+    count: uint,
+    claimed: bool
+  }
+)
+
+(define-map extra-access
+  { id: uint, who: principal }
+  {
+    granted: bool
+  }
+)
+
+(define-public (create-pool
+  (title (string-utf8 64))
+  (purpose (string-utf8 96))
+  (min-contribution uint)
+  (max-participants uint)
+  (access-price uint)
+  (donor-share-bps uint))
+  (begin
+    (asserts! (> min-contribution u0) (err ERR_POOL_ZERO))
+    (asserts! (> max-participants u0) (err ERR_POOL_ZERO))
+    (asserts! (> access-price u0) (err ERR_POOL_ZERO))
+    (asserts! (<= donor-share-bps BPS) (err ERR_POOL_INVALID))
+    (let ((id (var-get next-pool-id)))
+      (map-set pools { id: id } {
+        owner: tx-sender,
+        title: title,
+        purpose: purpose,
+        min-contribution: min-contribution,
+        max-participants: max-participants,
+        access-price: access-price,
+        donor-share-bps: donor-share-bps,
+        open: true,
+        created-at: stacks-block-height
+      })
+      (map-set pool-funding { id: id } {
+        total-funded: u0,
+        donor-allocation: u0,
+        donor-claimed: u0,
+        owner-withdrawn: u0,
+        participants: u0,
+        donors: u0,
+        total-datasets: u0
+      })
+      (var-set next-pool-id (+ id u1))
+      (ok id)
+    )
+  )
+)
+
+(define-public (join-pool (id uint) (amount uint))
+  (begin
+    (asserts! (> amount u0) (err ERR_POOL_ZERO))
+    (let (
+      (pool (unwrap! (map-get? pools { id: id }) err-not-found))
+      (pf (unwrap! (map-get? pool-funding { id: id }) err-not-found))
+      (existing (map-get? pool-participant { id: id, who: tx-sender }))
+    )
+      (asserts! (get open pool) (err ERR_POOL_CLOSED))
+      (asserts! (>= amount (get min-contribution pool)) (err ERR_POOL_MIN_CONTRIB))
+      (if (is-none existing)
+        (begin
+          (asserts! (< (get participants pf) (get max-participants pool)) (err ERR_POOL_MAX_PARTICIPANTS))
+          (try! (stx-transfer? amount tx-sender (as-contract tx-sender)))
+          (map-set pool-participant { id: id, who: tx-sender } {
+            contributed: amount,
+            joined-at: stacks-block-height
+          })
+          (map-set pool-funding { id: id } (merge pf {
+            total-funded: (+ (get total-funded pf) amount),
+            participants: (+ (get participants pf) u1)
+          }))
+          (ok amount)
+        )
+        (let ((prev (unwrap-panic existing)))
+          (try! (stx-transfer? amount tx-sender (as-contract tx-sender)))
+          (map-set pool-participant { id: id, who: tx-sender } {
+            contributed: (+ (get contributed prev) amount),
+            joined-at: (get joined-at prev)
+          })
+          (map-set pool-funding { id: id } (merge pf {
+            total-funded: (+ (get total-funded pf) amount)
+          }))
+          (ok amount)
+        )
+      )
+    )
+  )
+)
+
+(define-public (contribute-datasets (id uint) (dataset-list (list 32 uint)))
+  (begin
+    (let (
+      (pool (unwrap! (map-get? pools { id: id }) err-not-found))
+      (pf (unwrap! (map-get? pool-funding { id: id }) err-not-found))
+      (c (len dataset-list))
+    )
+      (asserts! (get open pool) (err ERR_POOL_CLOSED))
+      (asserts! (> c u0) (err ERR_POOL_ZERO))
+      (asserts! (is-none (map-get? pool-donor { id: id, who: tx-sender })) (err ERR_POOL_ALREADY_CONTRIBUTED))
+      (map-set pool-donor { id: id, who: tx-sender } {
+        datasets: dataset-list,
+        count: c,
+        claimed: false
+      })
+      (map-set pool-funding { id: id } (merge pf {
+        donors: (+ (get donors pf) u1),
+        total-datasets: (+ (get total-datasets pf) c)
+      }))
+      (ok c)
+    )
+  )
+)
+
+(define-public (finalize-pool (id uint))
+  (begin
+    (let (
+      (pool (unwrap! (map-get? pools { id: id }) err-not-found))
+      (pf (unwrap! (map-get? pool-funding { id: id }) err-not-found))
+    )
+      (asserts! (is-eq (get owner pool) tx-sender) err-unauthorized)
+      (asserts! (get open pool) (err ERR_POOL_ALREADY_FINAL))
+      (asserts! (>= (get total-funded pf) (get access-price pool)) (err ERR_POOL_INSUFFICIENT))
+      (let ((alloc (/ (* (get total-funded pf) (get donor-share-bps pool)) BPS)))
+        (map-set pool-funding { id: id } (merge pf {
+          donor-allocation: alloc
+        }))
+        (map-set pools { id: id } (merge pool {
+          open: false
+        }))
+        (ok true)
+      )
+    )
+  )
+)
+
+(define-public (grant-extra-access (id uint) (who principal))
+  (let ((pool (unwrap! (map-get? pools { id: id }) err-not-found)))
+    (asserts! (is-eq (get owner pool) tx-sender) err-unauthorized)
+    (map-set extra-access { id: id, who: who } {
+      granted: true
+    })
+    (ok true)
+  )
+)
+
+(define-public (revoke-extra-access (id uint) (who principal))
+  (let ((pool (unwrap! (map-get? pools { id: id }) err-not-found)))
+    (asserts! (is-eq (get owner pool) tx-sender) err-unauthorized)
+    (map-delete extra-access { id: id, who: who })
+    (ok true)
+  )
+)
+
+(define-public (withdraw-owner (id uint) (amount uint) (recipient principal))
+  (begin
+    (asserts! (> amount u0) (err ERR_POOL_ZERO))
+    (let (
+      (pool (unwrap! (map-get? pools { id: id }) err-not-found))
+      (pf (unwrap! (map-get? pool-funding { id: id }) err-not-found))
+    )
+      (asserts! (is-eq (get owner pool) tx-sender) err-unauthorized)
+      (asserts! (not (get open pool)) (err ERR_POOL_OPEN))
+      (let ((available (- (get total-funded pf) (+ (get donor-allocation pf) (get owner-withdrawn pf)))))
+        (asserts! (<= amount available) (err ERR_POOL_INSUFFICIENT))
+        (try! (as-contract (stx-transfer? amount tx-sender recipient)))
+        (map-set pool-funding { id: id } (merge pf {
+          owner-withdrawn: (+ (get owner-withdrawn pf) amount)
+        }))
+        (ok amount)
+      )
+    )
+  )
+)
+
+(define-public (claim-donor-reward (id uint))
+  (let (
+    (pool (unwrap! (map-get? pools { id: id }) err-not-found))
+    (pf (unwrap! (map-get? pool-funding { id: id }) err-not-found))
+    (rec (unwrap! (map-get? pool-donor { id: id, who: tx-sender }) (err ERR_POOL_NOT_ELIGIBLE)))
+  )
+    (asserts! (not (get open pool)) (err ERR_POOL_NOT_FINAL))
+    (asserts! (not (get claimed rec)) (err ERR_POOL_NOT_ELIGIBLE))
+    (asserts! (> (get total-datasets pf) u0) (err ERR_POOL_NOT_ELIGIBLE))
+    (let (
+      (share (/ (* (get donor-allocation pf) (get count rec)) (get total-datasets pf)))
+      (remaining (- (get donor-allocation pf) (get donor-claimed pf)))
+    )
+      (asserts! (> share u0) (err ERR_POOL_INSUFFICIENT))
+      (asserts! (<= share remaining) (err ERR_POOL_INSUFFICIENT))
+      (try! (as-contract (stx-transfer? share tx-sender tx-sender)))
+      (map-set pool-donor { id: id, who: tx-sender } (merge rec {
+        claimed: true
+      }))
+      (map-set pool-funding { id: id } (merge pf {
+        donor-claimed: (+ (get donor-claimed pf) share)
+      }))
+      (ok share)
+    )
+  )
+)
+
+(define-read-only (has-pool-access (id uint) (who principal))
+  (let (
+    (pool (unwrap! (map-get? pools { id: id }) err-not-found))
+    (p (map-get? pool-participant { id: id, who: who }))
+    (extra (map-get? extra-access { id: id, who: who }))
+  )
+    (ok (or (and (is-some p) (not (get open pool))) (is-some extra)))
+  )
+)
+
+(define-read-only (can-join-pool (id uint) (who principal) (amount uint))
+  (let (
+    (pool (unwrap! (map-get? pools { id: id }) err-not-found))
+    (pf (unwrap! (map-get? pool-funding { id: id }) err-not-found))
+    (ex (map-get? pool-participant { id: id, who: who }))
+  )
+    (ok (and (get open pool)
+             (>= amount (get min-contribution pool))
+             (or (is-some ex) (< (get participants pf) (get max-participants pool)))))
+  )
+)
+
+(define-read-only (get-pool (id uint))
+  (map-get? pools { id: id })
+)
+
+(define-read-only (get-pool-funding (id uint))
+  (map-get? pool-funding { id: id })
+)
+
+(define-read-only (get-participant (id uint) (who principal))
+  (map-get? pool-participant { id: id, who: who })
+)
+
+(define-read-only (get-donor (id uint) (who principal))
+  (map-get? pool-donor { id: id, who: who })
+)
+
+(define-read-only (get-pool-stats (id uint))
+  (match (map-get? pool-funding { id: id }) pf
+    (some {
+      total-funded: (get total-funded pf),
+      participants: (get participants pf),
+      donors: (get donors pf),
+      total-datasets: (get total-datasets pf),
+      donor-allocation: (get donor-allocation pf),
+      donor-claimed: (get donor-claimed pf)
+    })
+    none
+  )
+)
+
+(define-read-only (get-total-pools)
+  (- (var-get next-pool-id) u1)
+)
